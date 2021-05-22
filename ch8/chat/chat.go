@@ -12,26 +12,34 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
+	"time"
 )
 
 //!+broadcaster
 type client chan<- string // an outgoing message channel
 
+type clientChannel struct {
+	channel    client
+	clientName string
+}
+
 var (
-	entering = make(chan client)
-	leaving  = make(chan client)
+	entering = make(chan clientChannel)
+	leaving  = make(chan clientChannel)
 	messages = make(chan string) // all incoming client messages
+	clients  = make(map[clientChannel]bool)
 )
 
 func broadcaster() {
-	clients := make(map[client]bool) // all connected clients
+	//clients := make(map[clientChannel]bool) // all connected clients
 	for {
 		select {
 		case msg := <-messages:
 			// Broadcast incoming message to all
 			// clients' outgoing message channels.
 			for cli := range clients {
-				cli <- msg
+				cli.channel <- msg
 			}
 
 		case cli := <-entering:
@@ -39,7 +47,7 @@ func broadcaster() {
 
 		case cli := <-leaving:
 			delete(clients, cli)
-			close(cli)
+			close(cli.channel)
 		}
 	}
 }
@@ -52,19 +60,57 @@ func handleConn(conn net.Conn) {
 	go clientWriter(conn, ch)
 
 	who := conn.RemoteAddr().String()
-	ch <- "You are " + who
-	messages <- who + " has arrived"
-	entering <- ch
+	newClient := clientChannel{
+		channel:    ch,
+		clientName: who,
+	}
 
+	broadcastAllClientNames(ch)
+	ch <- "You are " + who
+
+	messages <- who + " has arrived"
+	entering <- newClient
+
+	shout := make(chan string)
+
+	go checkIdle(shout, conn)
+
+	scan(who, conn, shout)
+	// NOTE: ignoring potential errors from input.Err()
+
+	leaving <- newClient
+	messages <- who + " has left"
+	conn.Close()
+}
+
+func broadcastAllClientNames(ch chan string) {
+	var clientNames []string
+	for cli := range clients {
+		clientNames = append(clientNames, cli.clientName)
+	}
+	ch <- "Current set of clients: " + strings.Join(clientNames, " ")
+}
+
+func checkIdle(shout chan string, c net.Conn) {
+	ticker := time.NewTicker(1 * time.Second)
+	for countdown := 10; countdown > 0; countdown-- {
+		fmt.Println(countdown)
+		select {
+		case <-ticker.C:
+		case _ = <-shout:
+			countdown = 10
+		}
+	}
+	c.Close()
+	ticker.Stop()
+}
+
+func scan(who string, conn net.Conn, shout chan string) {
 	input := bufio.NewScanner(conn)
 	for input.Scan() {
 		messages <- who + ": " + input.Text()
+		shout <- input.Text()
 	}
-	// NOTE: ignoring potential errors from input.Err()
-
-	leaving <- ch
-	messages <- who + " has left"
-	conn.Close()
 }
 
 func clientWriter(conn net.Conn, ch <-chan string) {
